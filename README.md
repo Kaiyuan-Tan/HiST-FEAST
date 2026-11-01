@@ -117,6 +117,18 @@ python train.py --genes 100 --epochs 3
 
 直接执行 `python train.py` 时，默认使用 10 个共同目标基因、3 个 epoch、学习率 `1e-4`、建图半径 550 原图像素，自动选择 CUDA 或 CPU。
 
+### UNI 分批特征提取
+
+当整张切片送入 UNI 导致显存不足时，使用 `train_patch.py`：
+
+```powershell
+python train_patch.py --genes 100 --epochs 3 --uni-batch-size 64
+```
+
+原始图像保留在 CPU，每次只将指定数量的 patch 送入冻结的 UNI，归一化也在每个小批次内部执行。特征按原 patch 顺序汇总，再用完整邻接矩阵执行 GCN 和 ResNet，每张切片更新一次参数。`--uni-batch-size` 默认为 64，可根据显存调整；其余训练参数及数据检查方式与 `train.py` 相同，默认输出目录为 `outputs/train_patch/`。
+
+分批只降低 UNI 的前向显存峰值，GCN 和 ResNet 仍处理整张切片，CPU 仍需容纳整张切片的原始 patch。
+
 ## 路径定位规则
 
 1. `train.py` 通过 `Path(__file__).resolve().parent` 定位项目根目录。
