@@ -28,6 +28,10 @@ HiST-FEAST/
 ├── download/
 │   ├── HEST_dataset_download.py    # 下载 HEST 图像 patch 和表达数据
 │   └── UNI_ckpt_download.py        # 下载 UNI 预训练权重
+├── scripts/
+│   ├── separate_species.py        # 按元数据分离人类和小鼠切片
+│   ├── split_dataset.py           # 按完整切片划分 train/val/test
+│   └── dataset_files.py           # 成对文件操作与路径规则
 ├── dataloader/
 │   ├── HESTDataset.py              # 按切片读取图像、标签和稀疏邻接矩阵
 │   └── make_adjacency.py           # 按空间距离构建带自连接的邻接矩阵
@@ -74,7 +78,6 @@ hest_data/patches/TENX99.h5  ↔  hest_data/st/TENX99.h5ad
 
 - `.h5` 中读取 `img`、`coords`，以及 `barcode` 或 `barcodes`。
 - `.h5ad` 中读取表达矩阵 `X`；按 patch barcode 对齐行，按统一的 `gene_names` 对齐列。
-- 同名基因在共同基因统计中只计一次；读取标签时，按 spot 将同名列的原始计数相加，并在相加前转为 float32。barcode 重复仍会报错。原始 `.h5ad` 文件不会被修改，也不会给基因名自动添加后缀。
 - 每个 Dataset 样本是一张切片：图像为 `[N, 3, 224, 224]`，稀疏邻接矩阵为 `[N, N]`，标签为 `[N, G]`。
 - 训练直接读取 `patches/` 和 `st/`，当前流程不要求读取完整 WSI、单条转录本或细胞分割文件。
 
@@ -128,6 +131,81 @@ python download/HEST_dataset_download.py --organ Breast --local-dir hest_data/Br
 总大小按远程完整文件字节数统计，已存在的本地文件也计入；它不是剩余下载流量，也不包括缓存、元数据及传输开销。实际下载由 Hugging Face 处理已有文件和缓存。预览会显示仓库 commit；在下载命令加上 `--revision <该 commit>`，可固定为同一数据版本。可用 `--metadata-file HEST_v1_3_0.csv` 指定仓库中的元数据版本。
 
 默认保存到 `hest_data/patches/` 和 `hest_data/st/`。如果不同器官需要分别训练，可像上例用 `--local-dir hest_data/Breast` 单独保存，并用 `python train.py --root hest_data/Breast ...` 训练；当前训练脚本会读取指定目录中的全部切片。
+
+## 按物种分离数据
+
+在项目根目录运行：
+
+```bash
+python scripts/separate_species.py --root hest_data --output-dir hest_data_species
+```
+
+脚本只获取官方 HEST 的小型元数据 CSV，使用 `id` 对应的 `species` 分类已有文件，不会重新下载 patches 或 st。默认从 `config/token.json` 读取 token。也可提供本地元数据 CSV，离线完成分类：
+
+```bash
+python scripts/separate_species.py --root hest_data --output-dir hest_data_species --metadata /path/to/HEST_v1_3_0.csv
+```
+
+生成结构：
+
+```text
+hest_data_species/
+├── manifest.json
+├── human/
+│   ├── patches/*.h5
+│   └── st/*.h5ad
+└── mouse/
+    ├── patches/*.h5
+    └── st/*.h5ad
+```
+
+`Homo sapiens` 对应 `human/`，`Mus musculus` 对应 `mouse/`。混合物种及其他标注会进入额外的 `other/`，不会归入人类或小鼠。元数据中不存在的切片会报错。
+
+## 按 7:2:1 划分训练、验证和测试集
+
+选择一个包含 `patches/` 和 `st/` 的 dataset 文件夹，例如分离后的小鼠数据：
+
+```bash
+python scripts/split_dataset.py --root hest_data_species/mouse --output-dir hest_data_splits/mouse --seed 42
+```
+
+生成结构：
+
+```text
+hest_data_splits/mouse/
+├── manifest.json
+├── train/
+│   ├── patches/*.h5
+│   └── st/*.h5ad
+├── val/
+│   ├── patches/*.h5
+│   └── st/*.h5ad
+└── test/
+    ├── patches/*.h5
+    └── st/*.h5ad
+```
+
+划分单位是一张完整切片，同名 `.h5` 和 `.h5ad` 始终分在同一组，同一切片不会跨集合。默认种子为 42；输入切片清单和种子相同，划分结果相同。非 10 的整数倍采用最大余数法分配整数数量：例如 171 张分为 120/34/17，43 张分为 30/9/4。至少需要 3 张切片，小样本优先保证三组非空。
+
+这是按切片的随机划分，没有按患者分组；同一患者可能有多张切片，若实验要求患者之间独立，需要进一步按患者划分。
+
+两个脚本的共同规则：
+
+- 默认 `--mode hardlink`，使用硬链接保留原始文件路径并节省磁盘空间。硬链接共享文件内容，适合只读训练；修改任一链接的文件内容会影响另一处。
+- 需要独立文件副本时加 `--mode copy`；源目录与输出目录位于不同文件系统时也需要此选项。
+- 加 `--dry-run` 只预览分类或划分数量，不生成 dataset 文件。
+- 输入文件必须全部成对；缺少 patches 或 st 时会停止。输出目录必须不存在或为空，避免混入旧的分类或划分。
+- `manifest.json` 记录每张切片的去向、原始目录、操作方式，以及元数据来源或随机种子。
+- 所有相对路径均以项目根目录为基准。脚本只整理文件，不修改表达值或处理重复基因名。
+
+使用划分后的训练集：
+
+```bash
+python train_patch.py --root hest_data_splits/mouse/train --genes 100 --check-data
+python train_patch.py --root hest_data_splits/mouse/train --genes 100 --epochs 3 --lr 1e-4 --uni-batch-size 64
+```
+
+当前 `train.py` / `train_patch.py` 只包含训练循环，不会因生成 val/test 目录而自动评估；独立评估需复用训练输出中的目标基因顺序。训练和 Dataset 已恢复至提交 `138381c` 的读取逻辑：重复 barcode 或重复基因名会报错，不会自动合并同名列。按物种分离、划分目录都不会消除原始数据中的重复名称。
 
 ## 运行方式
 

@@ -1,2 +1,6 @@
 # Local credentials
 /config/token.json
+
+# Generated dataset directories
+/hest_data_species/
+/hest_data_splits/

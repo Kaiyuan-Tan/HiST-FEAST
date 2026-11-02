@@ -9,42 +9,6 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from dataloader.make_adjacency import make_adjacency
 
-
-def read_gene_expression(data, barcodes, gene_names):
-    """Align spots and sum raw expression columns with the same gene name."""
-    if not data.obs_names.is_unique:
-        raise ValueError("Expression data contains duplicate barcodes.")
-    gene_names = list(gene_names)
-    if not gene_names or len(set(gene_names)) != len(gene_names):
-        raise ValueError("Target gene names must be nonempty and unique.")
-    rows = data.obs_names.get_indexer(barcodes)
-    if (rows < 0).any():
-        raise ValueError("Patch barcodes are missing from expression data.")
-
-    targets = {name: i for i, name in enumerate(gene_names)}
-    target_columns = np.array([targets.get(name, -1) for name in data.var_names])
-    columns = np.flatnonzero(target_columns >= 0)
-    missing = set(gene_names).difference(data.var_names)
-    if missing:
-        raise ValueError(f"Missing target genes: {sorted(missing)}")
-
-    # Integer positions work even when the AnnData column index is not unique.
-    # Cast before summing so uint16 count matrices cannot overflow during grouping.
-    # HDF5 dense datasets support only one fancy-indexed axis at a time.
-    expression = (data[:, columns].X[rows, :] if data.isbacked
-                  else data[rows, columns].X)
-    expression = expression.astype(np.float32)
-    grouping = sp.csr_matrix(
-        (np.ones(len(columns), dtype=np.float32),
-         (np.arange(len(columns)), target_columns[columns])),
-        shape=(len(columns), len(gene_names)),
-    )
-    label = (grouping.T @ expression.T).T
-    if sp.issparse(label):
-        label = label.toarray()
-    return np.asarray(label, dtype=np.float32)
-
-
 class HESTDataset(Dataset):
     def __init__(self, root, gene_names, transform, radius=550):
         root = Path(root)
@@ -74,7 +38,9 @@ class HESTDataset(Dataset):
 
         # 按 patch 的 barcode 顺序和指定的基因顺序读取标签
         data = ad.read_h5ad(self.gt_path[index])
-        label = read_gene_expression(data, barcodes, self.gene_names)
+        label = data[barcodes, self.gene_names].X
+        if sp.issparse(label):
+            label = label.toarray()
         label = torch.as_tensor(label, dtype=torch.float32)
 
         A = make_adjacency(coords, r=self.r).astype(np.float32).tocoo()

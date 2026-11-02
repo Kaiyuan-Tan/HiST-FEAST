@@ -37,13 +37,9 @@ def select_gene_names(root, count):
     for path in patch_paths:
         data = ad.read_h5ad(root / "st" / f"{path.stem}.h5ad", backed="r")
         try:
-            if not data.obs_names.is_unique:
-                raise ValueError(f"{path.stem}: duplicate expression barcodes.")
-            targets = [g for g in data.var_names if not g.startswith(CONTROL_PREFIXES)]
-            names = list(dict.fromkeys(targets))
-            if len(names) != len(targets):
-                print(f"{path.stem}: {len(targets) - len(names)} extra columns with repeated "
-                      "gene names; labels will sum counts for each name.", flush=True)
+            if not data.obs_names.is_unique or not data.var_names.is_unique:
+                raise ValueError(f"{path.stem}: duplicate barcodes or feature names.")
+            names = [g for g in data.var_names if not g.startswith(CONTROL_PREFIXES)]
             available = set(names)
             gene_names = names if gene_names is None else [g for g in gene_names if g in available]
         finally:
@@ -57,8 +53,6 @@ def check_dataset(dataset):
     for patch_path, gt_path in zip(dataset.path, dataset.gt_path):
         data = ad.read_h5ad(gt_path, backed="r")
         try:
-            if not data.obs_names.is_unique:
-                raise ValueError(f"{patch_path.stem}: duplicate expression barcodes.")
             with h5py.File(patch_path, "r") as handle:
                 key = "barcodes" if "barcodes" in handle else "barcode"
                 barcodes = handle[key].asstr()[:].reshape(-1)
@@ -173,7 +167,7 @@ def main():
                 "weights_path": str(weights_path),
                 "slides": [path.stem for path in dataset.path],
                 "gene_names": gene_names, "label_transform": "raw", "adjacency": "unnormalized",
-                "epoch_loss": "mean of per-slide MSE", "duplicate_genes": "sum_raw_counts"}
+                "epoch_loss": "mean of per-slide MSE"}
     (output_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print(f"device={device}, slides={len(dataset)}, genes={len(gene_names)}", flush=True)
     loss_history = []
