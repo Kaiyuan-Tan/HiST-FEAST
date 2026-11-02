@@ -139,7 +139,8 @@ def main():
                 "weights_path": str(weights_path),
                 "slides": [path.stem for path in dataset.path],
                 "gene_names": gene_names, "label_transform": "raw", "adjacency": "unnormalized",
-                "epoch_loss": "mean of per-slide MSE", "uni_extraction": "batched"}
+                "epoch_loss": "mean of per-slide MSE", "uni_extraction": "batched",
+                "duplicate_genes": "sum_raw_counts"}
     (output_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print(f"device={device}, slides={len(dataset)}, genes={len(gene_names)}, "
           f"uni_batch_size={args.uni_batch_size}", flush=True)

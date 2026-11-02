@@ -74,6 +74,7 @@ hest_data/patches/TENX99.h5  ↔  hest_data/st/TENX99.h5ad
 
 - `.h5` 中读取 `img`、`coords`，以及 `barcode` 或 `barcodes`。
 - `.h5ad` 中读取表达矩阵 `X`；按 patch barcode 对齐行，按统一的 `gene_names` 对齐列。
+- 同名基因在共同基因统计中只计一次；读取标签时，按 spot 将同名列的原始计数相加，并在相加前转为 float32。barcode 重复仍会报错。原始 `.h5ad` 文件不会被修改，也不会给基因名自动添加后缀。
 - 每个 Dataset 样本是一张切片：图像为 `[N, 3, 224, 224]`，稀疏邻接矩阵为 `[N, N]`，标签为 `[N, G]`。
 - 训练直接读取 `patches/` 和 `st/`，当前流程不要求读取完整 WSI、单条转录本或细胞分割文件。
 
