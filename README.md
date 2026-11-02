@@ -20,6 +20,7 @@ E:\workplace\HiST-FEAST
 HiST-FEAST/
 ├── README.md                       # 项目结构和路径说明
 ├── train.py                        # 训练入口
+├── evaluate.py                     # 使用已保存 checkpoint 独立评估 test 数据
 ├── GCN.ipynb                       # 实验 Notebook
 ├── .gitignore                      # 忽略本地 token 配置
 ├── config/
@@ -207,7 +208,7 @@ python train_patch.py --root hest_data_splits/mouse/train --val-root hest_data_s
 python train_patch.py --root hest_data_splits/mouse/train --val-root hest_data_splits/mouse/val --genes 100 --epochs 3 --lr 1e-4 --uni-batch-size 64
 ```
 
-`--root` 指向训练集，`--val-root` 指向验证集。指定验证集后，两个训练入口均在每个 epoch 的训练完成后执行验证，打印 Train MSE 和 Val MSE，并保存验证 MSE 最低的 `best.pt`；没有指定 `--val-root` 时仍执行原来的纯训练流程。当前没有自动执行 test 评估。
+`--root` 指向训练集，`--val-root` 指向验证集。指定验证集后，两个训练入口均在每个 epoch 的训练完成后执行验证，打印 Train MSE 和 Val MSE，并保存验证 MSE 最低的 `best.pt`；没有指定 `--val-root` 时仍执行原来的纯训练流程。训练入口不自动执行 test 评估，独立测试使用 `evaluate.py`。
 
 目标基因仅从训练集选择；验证集使用完全相同的名称和列顺序，不重新选基因。启动前检查两组切片 ID 是否重叠、barcode/坐标/图像形状及目标基因是否有效；验证集为空、缺少目标基因或出现重复 barcode/基因名时会报错。`--check-data` 会检查两组数据后退出，不加载 UNI、不训练。
 
@@ -246,6 +247,57 @@ python train_patch.py --genes 100 --epochs 3 --uni-batch-size 64
 原始图像保留在 CPU，每次只将指定数量的 patch 送入冻结的 UNI，归一化也在每个小批次内部执行。特征按原 patch 顺序汇总，再用完整邻接矩阵执行 GCN 和 ResNet，每张切片更新一次参数。`--uni-batch-size` 默认为 64，可根据显存调整；其余训练参数及数据检查方式与 `train.py` 相同，默认输出目录为 `outputs/train_patch/`。
 
 分批只降低 UNI 的前向显存峰值，GCN 和 ResNet 仍处理整张切片，CPU 仍需容纳整张切片的原始 patch。可用 `--val-root` 加入验证，验证的 UNI 前向也使用相同分批大小。
+
+## 在测试集上评估已训练模型
+
+先检查测试集与 checkpoint 是否匹配：
+
+```bash
+python evaluate.py --root hest_data_splits/mouse/test --checkpoint outputs/train_patch_mouse/best.pt --check-data
+```
+
+检查会直接采用 checkpoint 中保存的基因及顺序、建图半径，核对测试集基因和 barcode。当前 evaluation 不检查测试切片是否与训练/验证切片重叠，需要自行选择独立的 test 目录。不需要提供 `--genes`，也不会从测试集重新筛选目标基因。`--check-data` 不加载 UNI、不推理、不写测试结果。
+
+通过检查后执行：
+
+```bash
+python evaluate.py \
+  --root hest_data_splits/mouse/test \
+  --checkpoint outputs/train_patch_mouse/best.pt \
+  --output-dir outputs/test_mouse \
+  --uni-batch-size 64 \
+  --device auto
+```
+
+该脚本可读取 `train.py` 或 `train_patch.py` 保存的 checkpoint，严格加载 GCN 和 ResNet 参数；需要项目中的 `ckpts/pytorch_model.bin` 与训练时的 UNI 权重相同，因为训练 checkpoint 没有重复保存冻结的 UNI。推理使用 eval 和 no_grad，UNI 按 patch 分批，GCN 和 ResNet 处理完整切片。
+
+`--uni-batch-size` 可省略，默认读取训练设置中的大小，没有记录时使用 64。所有路径均相对于项目根目录；`--checkpoint` 也可以指向下载回本地的 `server_results/outputs/train_patch_mouse/best.pt`，但本地评估还需要完整 test 数据、UNI 权重和运行依赖。
+
+输出文件：
+
+| 文件 | 内容 |
+|---|---|
+| `metrics.json` | checkpoint、基因顺序、测试切片，以及 HiST 口径的总体/逐切片 R² 和 PCC |
+| `slide_metrics.csv` | 每张切片的 patch 数、R2、PCC |
+| `gene_metrics.csv` | 每个基因的 R2、PCC，作为补充分析 |
+| `predictions/<id>.npz` | 仅加 `--save-predictions` 时生成：prediction、target、gene_names、barcodes，全部按 patch 顺序对齐 |
+
+评估指标采用 [HiST 官方代码](https://github.com/wwyi1828/HiST/blob/main/tasks/gene_prediction/trainer.py) 的两种汇总方式，计算定义对应其 [`r2_score` 和 `pearsonr`](https://github.com/wwyi1828/HiST/blob/main/lib/utils/metrics.py)：
+
+- `spot_metrics.R2` / `spot_metrics.PCC`：与 HiST 一样，使用 `np.vstack` 汇总测试切片，将全部 spot × gene 表达值展平成一维，然后直接调用 `sklearn.metrics.r2_score(true, pred)` 和 `scipy.stats.pearsonr(true, pred)[0]`。预测和真值以 float64 保存在 CPU 内存中。
+- `slide_avg_metrics.R2` / `slide_avg_metrics.PCC`：每张切片先展平并独立计算 R²、PCC，再对切片取等权平均。
+- `slide_std_metrics`：逐切片指标的总体标准差（`ddof=0`），与官方评估函数一致。它是切片间标准差，不是论文中四折交叉验证的折间标准差；本脚本评估单个 checkpoint 和指定 test 集。
+- `gene_metrics.csv`：另按每个基因在全部测试 patch 上直接调用同一组 sklearn/scipy 函数，便于定位表现较好的基因；该文件的基因平均不能替代上面的 HiST 总体指标。
+
+R² 使用 `1 - SSE/SST`，不是 PCC 的平方，负值会原样保留。真实值为常数时遵循 sklearn 的默认规则：完全预测正确时 R²=1，否则为 0。PCC 在预测或真值为常数时未定义；指标向量少于 2 个元素时两项均未定义。未定义值在 JSON 中用 null、CSV 中留空；逐切片均值/标准差中若存在未定义值，则相应汇总也为 null，保持官方 `np.mean/np.std` 的传播语义，不静默丢弃切片。`valid_slide_metrics` 和 `valid_gene_metrics` 给出有效数量。
+
+指标在线性表达空间计算，与 HiST 官方最终评估的尺度一致。当前项目模型已直接输出原始计数，因此不额外应用 `log1p` 或 `expm1`。本次只调整测试指标，训练仍使用原有原始计数 MSE 和最低 Val MSE 选择 `best.pt`。
+
+例如，导出预测和真值以便后续分析：
+
+```bash
+python evaluate.py --root hest_data_splits/mouse/test --checkpoint outputs/train_patch_mouse/best.pt --output-dir outputs/test_mouse --save-predictions
+```
 
 ## 路径定位规则
 
