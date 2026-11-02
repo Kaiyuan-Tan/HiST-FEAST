@@ -55,6 +55,8 @@ HiST-FEAST/
     └── train/
         ├── settings.json          # 本次训练参数、切片和基因顺序
         ├── loss_history.json      # 各 epoch 的训练 MSE
+        ├── val_loss_history.json  # 指定 --val-root 时生成，记录验证 MSE
+        ├── best.pt                # 验证 MSE 最低的 epoch；指定 --val-root 时生成
         └── last.pt                # 最近完成 epoch 的模型和优化器状态
 ```
 
@@ -201,11 +203,21 @@ hest_data_splits/mouse/
 使用划分后的训练集：
 
 ```bash
-python train_patch.py --root hest_data_splits/mouse/train --genes 100 --check-data
-python train_patch.py --root hest_data_splits/mouse/train --genes 100 --epochs 3 --lr 1e-4 --uni-batch-size 64
+python train_patch.py --root hest_data_splits/mouse/train --val-root hest_data_splits/mouse/val --genes 100 --check-data
+python train_patch.py --root hest_data_splits/mouse/train --val-root hest_data_splits/mouse/val --genes 100 --epochs 3 --lr 1e-4 --uni-batch-size 64
 ```
 
-当前 `train.py` / `train_patch.py` 只包含训练循环，不会因生成 val/test 目录而自动评估；独立评估需复用训练输出中的目标基因顺序。训练和 Dataset 已恢复至提交 `138381c` 的读取逻辑：重复 barcode 或重复基因名会报错，不会自动合并同名列。按物种分离、划分目录都不会消除原始数据中的重复名称。
+`--root` 指向训练集，`--val-root` 指向验证集。指定验证集后，两个训练入口均在每个 epoch 的训练完成后执行验证，打印 Train MSE 和 Val MSE，并保存验证 MSE 最低的 `best.pt`；没有指定 `--val-root` 时仍执行原来的纯训练流程。当前没有自动执行 test 评估。
+
+目标基因仅从训练集选择；验证集使用完全相同的名称和列顺序，不重新选基因。启动前检查两组切片 ID 是否重叠、barcode/坐标/图像形状及目标基因是否有效；验证集为空、缺少目标基因或出现重复 barcode/基因名时会报错。`--check-data` 会检查两组数据后退出，不加载 UNI、不训练。
+
+验证使用 `model.eval()` 和 `torch.no_grad()`，不反向传播、不更新参数。`train.py` 验证时仍一次处理整张切片；`train_patch.py` 验证时按 `--uni-batch-size` 提取 UNI 特征，再执行完整切片的 GCN 和 ResNet。训练和验证的 epoch MSE 都是各切片 MSE 的算术平均，每张切片等权。重复基因名仍不会自动合并；按物种分离、划分目录也不会消除原始数据中的重复名称。
+
+例如，使用整张切片前向的训练入口：
+
+```bash
+python train.py --root hest_data_splits/mouse/train --val-root hest_data_splits/mouse/val --genes 100 --epochs 3 --lr 1e-4
+```
 
 ## 运行方式
 
@@ -219,7 +231,7 @@ python train.py --check-data
 python train.py --genes 100 --epochs 3
 ```
 
-`--check-data` 检查图像形状、坐标及 barcode/基因对齐，随后退出，不加载 UNI 或开始训练。
+`--check-data` 检查训练集及已指定的验证集的图像形状、坐标及 barcode/基因对齐，随后退出，不加载 UNI 或开始训练。
 
 直接执行 `python train.py` 时，默认使用 10 个共同目标基因、3 个 epoch、学习率 `1e-4`、建图半径 550 原图像素，自动选择 CUDA 或 CPU。
 
@@ -233,12 +245,12 @@ python train_patch.py --genes 100 --epochs 3 --uni-batch-size 64
 
 原始图像保留在 CPU，每次只将指定数量的 patch 送入冻结的 UNI，归一化也在每个小批次内部执行。特征按原 patch 顺序汇总，再用完整邻接矩阵执行 GCN 和 ResNet，每张切片更新一次参数。`--uni-batch-size` 默认为 64，可根据显存调整；其余训练参数及数据检查方式与 `train.py` 相同，默认输出目录为 `outputs/train_patch/`。
 
-分批只降低 UNI 的前向显存峰值，GCN 和 ResNet 仍处理整张切片，CPU 仍需容纳整张切片的原始 patch。
+分批只降低 UNI 的前向显存峰值，GCN 和 ResNet 仍处理整张切片，CPU 仍需容纳整张切片的原始 patch。可用 `--val-root` 加入验证，验证的 UNI 前向也使用相同分批大小。
 
 ## 路径定位规则
 
 1. `train.py` 通过 `Path(__file__).resolve().parent` 定位项目根目录。
-2. `--root` 和 `--output-dir` 的相对路径均以项目根目录为基准；绝对路径直接使用。
+2. `--root`、`--val-root` 和 `--output-dir` 的相对路径均以项目根目录为基准；绝对路径直接使用。
 3. `--root` 指向同时包含 `patches/` 和 `st/` 的数据目录，而不是其中某一个子目录。
 4. UNI 权重由 `model/mymodel.py` 定位到项目根目录下的 `ckpts/pytorch_model.bin`。
 5. 两个下载脚本同样按自身文件位置定位项目根目录并读取 `config/token.json`；HEST 默认写入 `hest_data/`，可通过 `--local-dir` 修改，UNI 写入 `ckpts/`。
@@ -262,11 +274,13 @@ E:\workplace\HiST-FEAST\outputs\train
 
 | 输出文件 | 内容 |
 |---|---|
-| `settings.json` | 命令行参数、解析后的路径、参与训练的切片、目标基因及列顺序 |
+| `settings.json` | 命令行参数、解析后的路径、训练及验证切片、目标基因及列顺序 |
 | `loss_history.json` | 每个 epoch 的平均训练 MSE，统计方式为各切片 MSE 的平均值 |
-| `last.pt` | epoch、GCN 参数、ResNet 参数、优化器状态、基因列表、训练设置与 loss 历史 |
+| `val_loss_history.json` | 指定验证集时生成；每个 epoch 的平均验证 MSE，统计方式同训练 |
+| `last.pt` | 最近完成 epoch 的 GCN、ResNet、优化器状态、基因列表、训练设置、训练/验证历史及最佳验证指标 |
+| `best.pt` | 指定验证集时生成；最低 Val MSE 对应 epoch 的 checkpoint，误差相同时保留较早的 epoch |
 
-这些文件在训练过程中写入和更新。冻结的 UNI 权重不重复写入 `last.pt`；重新构建模型仍需要原始 `ckpts/pytorch_model.bin`。当前脚本没有 `--resume` 自动恢复入口。
+这些文件在训练过程中写入和更新；建议不同实验使用不同的 `--output-dir`。冻结的 UNI 权重不重复写入 checkpoint；重新构建模型仍需要原始 `ckpts/pytorch_model.bin`。当前脚本没有 `--resume` 自动恢复入口。
 
 ## 当前训练行为
 
@@ -276,6 +290,6 @@ E:\workplace\HiST-FEAST\outputs\train
 - 图像通过 `PILToTensor()` 保持 uint8，由 UNI 内部执行图像归一化；没有 patch 分批计算或激活 checkpoint。
 - UNI 冻结，训练 GCN 和 ResNet；邻接矩阵保留未归一化形式及自连接。
 - 标签使用原始存储计数，损失为 MSE；当前没有 log1p 或总量归一化。
-- 所有配对切片都参与训练；当前没有自动划分验证集或测试集。
+- `--root` 中的配对切片参与训练；可用 `--val-root` 指定单独的验证集。划分目录使用 `scripts/split_dataset.py`，训练入口不重新划分数据、不自动读取 test。
 - 目标基因取所有切片的共有真实靶基因，排除 BLANK 和阴性对照，按第一张切片的顺序选前 G 个；当前没有 HVG 排名。
 
