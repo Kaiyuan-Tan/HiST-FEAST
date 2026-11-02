@@ -100,14 +100,41 @@ config/token.json
 | `download/HEST_dataset_download.py` | 项目根目录下的 `hest_data/` |
 | `download/UNI_ckpt_download.py` | 项目根目录下的 `ckpts/pytorch_model.bin` |
 
-当前 HEST 下载脚本查询 `TENX95`、`TENX96`、`TENX97`、`TENX98`、`TENX99`，下载这些样本的 `patches/*.h5` 和 `st/*.h5ad`。需要其他样本时，修改下载脚本中的 `ids_to_query`。
+HEST 下载脚本从 Hugging Face 读取最新版本的 HEST 元数据，按类别筛选全部切片。默认只获取小型元数据 CSV 和远程文件大小，显示每张切片的 patches、st 大小和总量；加上 `--download` 才下载切片文件。
+
+```powershell
+# 查看器官类别及各类别的切片数
+python download/HEST_dataset_download.py --list-values organ
+
+# 预览 Breast 全部切片的 patches + st 大小
+python download/HEST_dataset_download.py --organ Breast
+
+# 确认大小后下载
+python download/HEST_dataset_download.py --organ Breast --download
+
+# 进一步限定为人类、Xenium、IDC；多个条件取交集
+python download/HEST_dataset_download.py --organ Breast --filter "species=Homo sapiens" --filter "st_technology=Xenium" --filter "oncotree_code=IDC"
+
+# 查看其他分类，例如测序技术；也可用 --list-values species 或 oncotree_code
+python download/HEST_dataset_download.py --list-values st_technology
+
+# 可选：保存逐文件字节数清单，并指定独立的数据目录
+python download/HEST_dataset_download.py --organ Breast --local-dir hest_data/Breast --report outputs/breast_download.csv
+```
+
+`--organ` 和 `--filter` 的值忽略大小写，采用完整值匹配；支持元数据中的任意列。只会下载精确匹配的 `patches/<id>.h5` 与 `st/<id>.h5ad`，不会附带 WSI、转录本或分割文件。如果任意匹配切片缺少其中一个文件，脚本会报出缺失清单并停止。
+
+总大小按远程完整文件字节数统计，已存在的本地文件也计入；它不是剩余下载流量，也不包括缓存、元数据及传输开销。实际下载由 Hugging Face 处理已有文件和缓存。预览会显示仓库 commit；在下载命令加上 `--revision <该 commit>`，可固定为同一数据版本。可用 `--metadata-file HEST_v1_3_0.csv` 指定仓库中的元数据版本。
+
+默认保存到 `hest_data/patches/` 和 `hest_data/st/`。如果不同器官需要分别训练，可像上例用 `--local-dir hest_data/Breast` 单独保存，并用 `python train.py --root hest_data/Breast ...` 训练；当前训练脚本会读取指定目录中的全部切片。
 
 ## 运行方式
 
 在已安装 PyTorch、torchvision、timm、anndata、h5py、numpy、scipy、scikit-learn、Pillow 和 tqdm 的 Python 环境中，从项目根目录运行：
 
 ```powershell
-python download/HEST_dataset_download.py
+python download/HEST_dataset_download.py --organ Breast
+python download/HEST_dataset_download.py --organ Breast --download
 python download/UNI_ckpt_download.py
 python train.py --check-data
 python train.py --genes 100 --epochs 3
@@ -135,7 +162,7 @@ python train_patch.py --genes 100 --epochs 3 --uni-batch-size 64
 2. `--root` 和 `--output-dir` 的相对路径均以项目根目录为基准；绝对路径直接使用。
 3. `--root` 指向同时包含 `patches/` 和 `st/` 的数据目录，而不是其中某一个子目录。
 4. UNI 权重由 `model/mymodel.py` 定位到项目根目录下的 `ckpts/pytorch_model.bin`。
-5. 两个下载脚本同样按自身文件位置定位项目根目录，读取 `config/token.json` 并写入固定的下载位置。
+5. 两个下载脚本同样按自身文件位置定位项目根目录并读取 `config/token.json`；HEST 默认写入 `hest_data/`，可通过 `--local-dir` 修改，UNI 写入 `ckpts/`。
 6. 当前 `train.py` 通过命令行接收训练参数，不读取 `config/train.json`。
 
 因此，从其他工作目录启动 `train.py` 时，默认数据和输出位置仍然是这个项目下的目录。Notebook 中自行使用的 `./` 路径则以 Notebook 内核的当前工作目录为准。
