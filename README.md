@@ -20,6 +20,7 @@ E:\workplace\HiST-FEAST
 HiST-FEAST/
 ├── README.md                       # 项目结构和路径说明
 ├── train.py                        # 训练入口
+├── train_patch.py                  # UNI 分批提取、完整切片图训练
 ├── evaluate.py                     # 使用已保存 checkpoint 独立评估 test 数据
 ├── GCN.ipynb                       # 实验 Notebook
 ├── .gitignore                      # 忽略本地 token 配置
@@ -32,10 +33,20 @@ HiST-FEAST/
 ├── scripts/
 │   ├── separate_species.py        # 按元数据分离人类和小鼠切片
 │   ├── split_dataset.py           # 按完整切片划分 train/val/test
-│   └── dataset_files.py           # 成对文件操作与路径规则
+│   └── dataset_files.py           # 旧导入路径的兼容入口
 ├── dataloader/
-│   ├── HESTDataset.py              # 按切片读取图像、标签和稀疏邻接矩阵
-│   └── make_adjacency.py           # 按空间距离构建带自连接的邻接矩阵
+│   └── HESTDataset.py              # 按切片读取图像、标签和稀疏邻接矩阵
+├── utils/
+│   ├── paths.py                   # 项目根目录与相对路径解析
+│   ├── data.py                    # 基因选择、训练/验证集准备和数据检查
+│   ├── dataset_files.py           # 成对文件检查与数据目录生成
+│   ├── checkpoints.py             # checkpoint 保存与评估元数据检查
+│   ├── features.py                # 冻结 UNI 的分批特征提取
+│   ├── training.py                # 标签、MSE 和梯度检查
+│   ├── load_model.py              # 设备选择、模型重建与权重加载
+│   ├── hf.py                      # Hugging Face token 配置读取
+│   ├── make_adjacency.py          # 按空间距离构建带自连接的邻接矩阵
+│   └── plot_expression.py         # 空间表达绘图与图片保存
 ├── model/
 │   ├── mymodel.py                  # UNI → GCN → ResNet
 │   ├── uni.py                      # 图像特征编码器
@@ -62,6 +73,8 @@ HiST-FEAST/
 ```
 
 `ckpts/`、`hest_data/` 和 `outputs/train/` 是权重、数据和运行产物的位置，不表示克隆仓库后已经存在这些文件。`TENX96`、`TENX99` 是同名图像与表达文件的配对示例。
+
+复用函数应从对应的 `utils` 模块导入，例如 `from utils.features import extract_uni_features`。训练、评估和可视化入口直接依赖这些模块；`train.py`、`train_patch.py` 中原有的公共函数名称以及 `scripts.dataset_files` 的旧导入路径仍可使用。
 
 ## 训练输入路径
 
@@ -299,9 +312,29 @@ R² 使用 `1 - SSE/SST`，不是 PCC 的平方，负值会原样保留。真实
 python evaluate.py --root hest_data_splits/mouse/test --checkpoint outputs/train_patch_mouse/best.pt --output-dir outputs/test_mouse --save-predictions
 ```
 
+## GT 与预测统一色标可视化
+
+```bash
+python visualization/compare_vis.py --slide NCBI338 --gene Map2
+python visualization/compare_vis.py --slide NCBI338 --gene Map2 Sox17
+```
+
+每个基因生成一张左右并排的 GT / prediction 图片，共用一个线性色标、相同坐标及点大小；默认范围为 0 到两组值中的最大值。全零数据使用 0–1，避免色标退化。GT 直接采用训练数据集返回的标签，按 patch barcode 和 checkpoint 基因顺序对齐，不进行 log 变换。多个基因共用一次模型推理，但各基因的图片分别确定色标。
+
+默认读取 `hest_data/`、`server_results/outputs/train_patch_mouse/best.pt` 和 `ckpts/pytorch_model.bin`，输出 `output/<slide>_<gene>_comparison.png`。建图半径使用 checkpoint 中保存的值。可用 `--root`、`--checkpoint`、`--uni-weights`、`--output-dir`、`--device` 和 `--uni-batch-size` 指定数据、权重、输出和推理设备。
+
+跨切片使用相同范围时，显式指定色标上下限，例如：
+
+```bash
+python visualization/compare_vis.py --slide NCBI338 --gene Map2 --vmin 0 --vmax 60
+python visualization/compare_vis.py --slide NCBI344 --gene Map2 --vmin 0 --vmax 60
+```
+
+指定的范围同样应用于 GT 和 prediction，超出范围的值显示为色图端点颜色。
+
 ## 路径定位规则
 
-1. `train.py` 通过 `Path(__file__).resolve().parent` 定位项目根目录。
+1. `utils/paths.py` 通过自身文件位置定位项目根目录，训练、评估、下载和数据整理脚本共用 `ROOT` 与 `project_path()`。
 2. `--root`、`--val-root` 和 `--output-dir` 的相对路径均以项目根目录为基准；绝对路径直接使用。
 3. `--root` 指向同时包含 `patches/` 和 `st/` 的数据目录，而不是其中某一个子目录。
 4. UNI 权重由 `model/mymodel.py` 定位到项目根目录下的 `ckpts/pytorch_model.bin`。

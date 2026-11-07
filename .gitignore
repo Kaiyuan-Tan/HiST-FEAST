@@ -4,3 +4,7 @@
 # Generated dataset directories
 /hest_data_species/
 /hest_data_splits/
+/server_results/
+/hest_data/
+/ckpts/
+/output/

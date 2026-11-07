@@ -11,40 +11,15 @@ import json
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 from tqdm.auto import tqdm
 
 from dataloader.HESTDataset import make_dataloader
-from train import ROOT, prepare_datasets, project_path, save_epoch
-
-
-@torch.no_grad()
-def extract_uni_features(uni, patches, device, batch_size):
-    """Keep raw slide images on CPU; transfer and normalize one chunk at a time.
-
-    Features retain the patch order used by adjacency and labels. Use no_grad,
-    rather than inference_mode, so the trainable GCN can save them for backward.
-    """
-    if batch_size <= 0:
-        raise ValueError("UNI batch size must be positive.")
-    if patches.dtype != torch.uint8:
-        raise TypeError("Use PILToTensor(): UNI expects raw uint8 images before /255.")
-    if patches.ndim != 4 or len(patches) == 0:
-        raise ValueError("Expected a nonempty batch of slide patches [N, C, H, W].")
-    if any(p.requires_grad for p in uni.parameters()):
-        raise ValueError("Batched feature extraction requires a frozen UNI.")
-    uni.eval()
-    features = None
-    for start in range(0, len(patches), batch_size):
-        batch = patches[start:start + batch_size].to(device)
-        batch_features = uni(batch)
-        if batch_features.ndim != 2 or batch_features.shape[0] != len(batch):
-            raise ValueError("UNI must return one feature vector per patch [B, D].")
-        if features is None:
-            features = batch_features.new_empty((len(patches), batch_features.shape[1]))
-        features[start:start + len(batch)].copy_(batch_features)
-        del batch, batch_features
-    return features
+from utils.checkpoints import save_epoch
+from utils.data import prepare_datasets
+from utils.features import extract_uni_features
+from utils.load_model import resolve_device
+from utils.paths import ROOT, project_path
+from utils.training import check_gradients, checked_mse_loss, validate_labels
 
 
 def train_one_epoch(model, loader, optimizer, device, epoch, epochs, uni_batch_size):
@@ -55,8 +30,7 @@ def train_one_epoch(model, loader, optimizer, device, epoch, epochs, uni_batch_s
     progress = tqdm(loader, desc=f"Epoch {epoch + 1}/{epochs}")
 
     for (patches, adjacency), labels in progress:
-        if not torch.isfinite(labels).all() or (labels < 0).any():
-            raise ValueError("Labels must be finite, nonnegative stored counts.")
+        validate_labels(labels)
         optimizer.zero_grad(set_to_none=True)
 
         # The loader's full uint8 slide stays on CPU, including during normalization.
@@ -65,15 +39,9 @@ def train_one_epoch(model, loader, optimizer, device, epoch, epochs, uni_batch_s
         labels = labels.to(device, dtype=torch.float32)
         # Aggregate all nodes together: splitting the graph would lose cross-chunk edges.
         predictions = model.resnet(model.gcn(features, adjacency))
-        if predictions.shape != labels.shape:
-            raise ValueError(f"Prediction shape {predictions.shape} != label shape {labels.shape}")
-        loss = F.mse_loss(predictions, labels)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Training loss is NaN or Inf.")
+        loss = checked_mse_loss(predictions, labels, phase="Training")
         loss.backward()
-        if any(p.grad is not None and not torch.isfinite(p.grad).all()
-               for p in model.parameters() if p.requires_grad):
-            raise FloatingPointError("Training gradients contain NaN or Inf.")
+        check_gradients(model)
         optimizer.step()
 
         total_loss += loss.item()
@@ -93,17 +61,12 @@ def validate_one_epoch(model, loader, device, epoch, epochs, uni_batch_size):
     slides = 0
     progress = tqdm(loader, desc=f"Val {epoch + 1}/{epochs}")
     for (patches, adjacency), labels in progress:
-        if not torch.isfinite(labels).all() or (labels < 0).any():
-            raise ValueError("Labels must be finite, nonnegative stored counts.")
+        validate_labels(labels)
         features = extract_uni_features(model.uni, patches, device, uni_batch_size)
         adjacency = adjacency.coalesce().to(device)
         labels = labels.to(device, dtype=torch.float32)
         predictions = model.resnet(model.gcn(features, adjacency))
-        if predictions.shape != labels.shape:
-            raise ValueError(f"Prediction shape {predictions.shape} != label shape {labels.shape}")
-        loss = F.mse_loss(predictions, labels)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Validation loss is NaN or Inf.")
+        loss = checked_mse_loss(predictions, labels, phase="Validation")
         total_loss += loss.item()
         slides += 1
         progress.set_postfix(mse=f"{loss.item():.6f}", patches=len(patches))
@@ -149,8 +112,7 @@ def main(argv=None):
         print("PASS: patch shapes, coordinates and barcode/gene alignment.")
         return
 
-    device = torch.device(("cuda" if torch.cuda.is_available() else "cpu")
-                          if args.device == "auto" else args.device)
+    device = resolve_device(args.device)
     weights_path = ROOT / "ckpts" / "pytorch_model.bin"
     if not weights_path.is_file():
         raise FileNotFoundError(f"Download UNI first: {weights_path}")

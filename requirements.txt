@@ -2,6 +2,7 @@ torch
 torchvision
 timm
 anndata
+matplotlib
 h5py
 numpy
 scipy

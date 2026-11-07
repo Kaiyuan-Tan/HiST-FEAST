@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.dataset_files import paired_samples, project_path, write_dataset
+from utils.dataset_files import paired_samples, write_dataset
+from utils.paths import project_path
 
 
 def split_counts(number):

@@ -1,26 +1,17 @@
 import argparse
 import csv
-import json
 import re
 from pathlib import Path
+import sys
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
-ROOT = Path(__file__).resolve().parents[1]
+# Support direct execution from any working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.hf import load_hf_token
+from utils.paths import ROOT, project_path
+
 REPO_ID = "MahmoodLab/hest"
-
-
-def load_hf_token():
-    config_path = ROOT / "config" / "token.json"
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f'Create {config_path} with an "hf_token" field.'
-        )
-    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    token = config.get("hf_token")
-    if not isinstance(token, str) or not token.strip():
-        raise ValueError(f"Set hf_token in {config_path} before downloading.")
-    return token.strip()
 
 
 def download_hest(patterns, local_dir, *, revision=None, token=None):
@@ -34,11 +25,6 @@ def download_hest(patterns, local_dir, *, revision=None, token=None):
         revision=revision,
         token=token if token is not None else load_hf_token(),
     )
-
-
-def project_path(value):
-    path = Path(value).expanduser()
-    return (path if path.is_absolute() else ROOT / path).resolve()
 
 
 def latest_metadata(files):

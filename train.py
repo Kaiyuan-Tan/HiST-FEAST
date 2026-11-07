@@ -9,96 +9,17 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
-import anndata as ad
-import h5py
 import numpy as np
 import torch
-from torch.nn import functional as F
-from torchvision.transforms import PILToTensor
 from tqdm.auto import tqdm
 
-from dataloader.HESTDataset import HESTDataset, make_dataloader
-
-ROOT = Path(__file__).resolve().parent
-CONTROL_PREFIXES = ("BLANK_", "NegControlCodeword_", "NegControlProbe_")
-
-
-def project_path(value):
-    path = Path(value).expanduser()
-    return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
-
-
-def select_gene_names(root, count):
-    patch_paths = sorted((root / "patches").glob("*.h5"))
-    if not patch_paths:
-        raise FileNotFoundError(f"No patch files found in {root / 'patches'}")
-    gene_names = None
-    for path in patch_paths:
-        data = ad.read_h5ad(root / "st" / f"{path.stem}.h5ad", backed="r")
-        try:
-            if not data.obs_names.is_unique or not data.var_names.is_unique:
-                raise ValueError(f"{path.stem}: duplicate barcodes or feature names.")
-            names = [g for g in data.var_names if not g.startswith(CONTROL_PREFIXES)]
-            available = set(names)
-            gene_names = names if gene_names is None else [g for g in gene_names if g in available]
-        finally:
-            data.file.close()
-    if len(gene_names) < count:
-        raise ValueError(f"Requested {count} genes, but only {len(gene_names)} targets are shared.")
-    return gene_names[:count]
-
-
-def check_dataset(dataset):
-    for patch_path, gt_path in zip(dataset.path, dataset.gt_path):
-        data = ad.read_h5ad(gt_path, backed="r")
-        try:
-            if not data.obs_names.is_unique or not data.var_names.is_unique:
-                raise ValueError(f"{patch_path.stem}: duplicate barcodes or feature names.")
-            with h5py.File(patch_path, "r") as handle:
-                key = "barcodes" if "barcodes" in handle else "barcode"
-                barcodes = handle[key].asstr()[:].reshape(-1)
-                coords = handle["coords"][:]
-                expected_shape = (len(barcodes), 224, 224, 3)
-                if (not len(barcodes) or handle["img"].shape != expected_shape
-                        or handle["img"].dtype != np.uint8):
-                    raise ValueError(f"{patch_path.stem}: expected nonempty uint8 N x 224 x 224 x 3 images.")
-                if len(np.unique(barcodes)) != len(barcodes):
-                    raise ValueError(f"{patch_path.stem}: duplicate patch barcodes.")
-                if (coords.shape != (len(barcodes), 2) or not np.isfinite(coords).all()):
-                    raise ValueError(f"{patch_path.stem}: invalid patch coordinates.")
-                if (data.obs_names.get_indexer(barcodes) < 0).any():
-                    raise ValueError(f"{patch_path.stem}: unmatched patch barcodes.")
-                missing = set(dataset.gene_names).difference(data.var_names)
-                if missing:
-                    raise ValueError(f"{patch_path.stem}: missing target genes: {sorted(missing)}")
-                print(f"{patch_path.stem}: patches={expected_shape}, "
-                      f"labels=({len(barcodes)}, {dataset.num_genes})", flush=True)
-        finally:
-            data.file.close()
-
-
-def prepare_datasets(root, genes, radius, val_root=None):
-    # Target selection uses training slides only. Validation uses the same order.
-    gene_names = select_gene_names(root, genes)
-    dataset = HESTDataset(root=root, gene_names=gene_names,
-                          transform=PILToTensor(), radius=radius)
-    val_dataset = None
-    if val_root is not None:
-        val_dataset = HESTDataset(root=val_root, gene_names=gene_names,
-                                  transform=PILToTensor(), radius=radius)
-        if not len(val_dataset):
-            raise ValueError(f"No validation patch files found in {val_root / 'patches'}")
-        overlap = {path.stem for path in dataset.path} & {path.stem for path in val_dataset.path}
-        if overlap:
-            raise ValueError(f"Train and validation slides overlap: {sorted(overlap)}")
-    print("Checking training data:", flush=True)
-    check_dataset(dataset)
-    if val_dataset is not None:
-        print("Checking validation data:", flush=True)
-        check_dataset(val_dataset)
-    return dataset, val_dataset
+from dataloader.HESTDataset import make_dataloader
+from utils.checkpoints import save_epoch
+from utils.data import check_dataset, prepare_datasets, select_gene_names
+from utils.load_model import resolve_device
+from utils.paths import ROOT, project_path
+from utils.training import check_gradients, checked_mse_loss, validate_labels
 
 
 def train_one_epoch(model, loader, optimizer, device, epoch, epochs):
@@ -115,20 +36,13 @@ def train_one_epoch(model, loader, optimizer, device, epoch, epochs):
         patches = patches.to(device)
         adjacency = adjacency.coalesce().to(device)
         labels = labels.to(device, dtype=torch.float32)
-        if not torch.isfinite(labels).all() or (labels < 0).any():
-            raise ValueError("Labels must be finite, nonnegative stored counts.")
+        validate_labels(labels)
         optimizer.zero_grad(set_to_none=True)
 
         predictions = model(patches, adjacency)
-        if predictions.shape != labels.shape:
-            raise ValueError(f"Prediction shape {predictions.shape} != label shape {labels.shape}")
-        loss = F.mse_loss(predictions, labels)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Training loss is NaN or Inf.")
+        loss = checked_mse_loss(predictions, labels, phase="Training")
         loss.backward()
-        if any(p.grad is not None and not torch.isfinite(p.grad).all()
-               for p in model.parameters() if p.requires_grad):
-            raise FloatingPointError("Training gradients contain NaN or Inf.")
+        check_gradients(model)
         optimizer.step()
 
         total_loss += loss.item()
@@ -154,14 +68,9 @@ def validate_one_epoch(model, loader, device, epoch, epochs):
         patches = patches.to(device)
         adjacency = adjacency.coalesce().to(device)
         labels = labels.to(device, dtype=torch.float32)
-        if not torch.isfinite(labels).all() or (labels < 0).any():
-            raise ValueError("Labels must be finite, nonnegative stored counts.")
+        validate_labels(labels)
         predictions = model(patches, adjacency)
-        if predictions.shape != labels.shape:
-            raise ValueError(f"Prediction shape {predictions.shape} != label shape {labels.shape}")
-        loss = F.mse_loss(predictions, labels)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Validation loss is NaN or Inf.")
+        loss = checked_mse_loss(predictions, labels, phase="Validation")
         total_loss += loss.item()
         slides += 1
         progress.set_postfix(mse=f"{loss.item():.6f}")
@@ -169,30 +78,6 @@ def validate_one_epoch(model, loader, device, epoch, epochs):
     if slides == 0:
         raise ValueError("No slides in the validation loader.")
     return total_loss / slides
-
-
-def save_epoch(output_dir, model, optimizer, epoch, gene_names, settings,
-               loss_history, val_loss_history):
-    best_epoch = (min(range(len(val_loss_history)), key=val_loss_history.__getitem__) + 1
-                  if val_loss_history else None)
-    best_val_mse = val_loss_history[best_epoch - 1] if best_epoch is not None else None
-    # UNI is frozen and continues to load from the original .bin when rebuilding MyModel.
-    checkpoint = {"epoch": epoch, "gene_names": gene_names, "settings": settings,
-                  "gcn_state_dict": model.gcn.state_dict(),
-                  "resnet_state_dict": model.resnet.state_dict(),
-                  "optimizer_state_dict": optimizer.state_dict(),
-                  "loss_history": loss_history, "val_loss_history": val_loss_history,
-                  "best_val_mse": best_val_mse, "best_epoch": best_epoch}
-    torch.save(checkpoint, output_dir / "last.pt")
-    if best_epoch == epoch:
-        torch.save(checkpoint, output_dir / "best.pt")
-    (output_dir / "loss_history.json").write_text(
-        json.dumps(loss_history, indent=2, allow_nan=False), encoding="utf-8"
-    )
-    if val_loss_history:
-        (output_dir / "val_loss_history.json").write_text(
-            json.dumps(val_loss_history, indent=2, allow_nan=False), encoding="utf-8"
-        )
 
 
 def parse_args(argv=None):
@@ -229,8 +114,7 @@ def main(argv=None):
         print("PASS: patch shapes, coordinates and barcode/gene alignment.")
         return
 
-    device = torch.device(("cuda" if torch.cuda.is_available() else "cpu")
-                          if args.device == "auto" else args.device)
+    device = resolve_device(args.device)
     weights_path = ROOT / "ckpts" / "pytorch_model.bin"
     if not weights_path.is_file():
         raise FileNotFoundError(f"Download UNI first: {weights_path}")

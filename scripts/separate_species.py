@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.dataset_files import paired_samples, project_path, write_dataset
+from utils.dataset_files import paired_samples, write_dataset
+from utils.paths import project_path
 
 
 def load_metadata(local_file=None):
@@ -14,7 +15,8 @@ def load_metadata(local_file=None):
         source = {"file": str(path)}
     else:
         from huggingface_hub import HfApi, hf_hub_download
-        from download.HEST_dataset_download import latest_metadata, load_hf_token
+        from download.HEST_dataset_download import latest_metadata
+        from utils.hf import load_hf_token
         token = load_hf_token()
         info = HfApi(token=token).dataset_info("MahmoodLab/hest")
         filename = latest_metadata(item.rfilename for item in info.siblings)

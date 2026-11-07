@@ -18,35 +18,11 @@ from torchvision.transforms import PILToTensor
 from tqdm.auto import tqdm
 
 from dataloader.HESTDataset import HESTDataset, make_dataloader
-from train import ROOT, check_dataset, project_path
-from train_patch import extract_uni_features
-
-
-def load_checkpoint(path):
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    required = {"gene_names", "settings", "gcn_state_dict", "resnet_state_dict"}
-    if not isinstance(checkpoint, dict) or not required.issubset(checkpoint):
-        raise ValueError("Expected a checkpoint saved by train.py or train_patch.py.")
-    genes = checkpoint["gene_names"]
-    if (not isinstance(genes, list) or not genes
-            or any(not isinstance(name, str) or not name for name in genes)
-            or len(set(genes)) != len(genes)):
-        raise ValueError("Checkpoint gene_names must be a nonempty list of unique names.")
-    settings = checkpoint["settings"]
-    if not isinstance(settings, dict):
-        raise ValueError("Invalid checkpoint settings.")
-    if settings.get("label_transform") != "raw" or settings.get("adjacency") != "unnormalized":
-        raise ValueError("This evaluator requires raw-count labels and unnormalized adjacency.")
-    radius = settings.get("radius")
-    if not isinstance(radius, (int, float)) or not math.isfinite(radius) or radius <= 0:
-        raise ValueError("Checkpoint must contain the training graph radius.")
-    for field in ("slides", "val_slides"):
-        names = settings.get(field, [])
-        if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
-            raise ValueError(f"Invalid {field} in checkpoint settings.")
-    if not settings.get("slides"):
-        raise ValueError("Checkpoint lacks training slide IDs.")
-    return checkpoint
+from utils.checkpoints import load_checkpoint
+from utils.data import check_dataset
+from utils.features import extract_uni_features
+from utils.load_model import build_model, resolve_device
+from utils.paths import ROOT, project_path
 
 
 def prepare_test_dataset(root, checkpoint):
@@ -232,13 +208,8 @@ def main(argv=None):
     weights_path = ROOT / "ckpts" / "pytorch_model.bin"
     if not weights_path.is_file():
         raise FileNotFoundError(f"UNI weights required: {weights_path}")
-    device = torch.device(("cuda" if torch.cuda.is_available() else "cpu")
-                          if args.device == "auto" else args.device)
-    from model.mymodel import MyModel
-    model = MyModel(feature_dim=1024, genes=dataset.num_genes)
-    model.gcn.load_state_dict(checkpoint["gcn_state_dict"], strict=True)
-    model.resnet.load_state_dict(checkpoint["resnet_state_dict"], strict=True)
-    model.to(device)
+    device = resolve_device(args.device)
+    model = build_model(checkpoint, uni_weights=weights_path, device=device)
     epoch = checkpoint.get("epoch")
     del checkpoint
     output_dir = project_path(args.output_dir)

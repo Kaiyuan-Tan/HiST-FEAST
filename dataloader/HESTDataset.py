@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from dataloader.make_adjacency import make_adjacency
+from utils.make_adjacency import make_adjacency
 
 class HESTDataset(Dataset):
     def __init__(self, root, gene_names, transform, radius=550):
